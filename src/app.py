@@ -1,122 +1,124 @@
-"""
-app.py
-Aplicación web que implementa los modelos de identificación de entidades biomédicas.
-
-@authors: Melissa Pérez, Sara Echeverría, Ricardo Méndez, Adrián Fulladolsa
-"""
-
 import streamlit as st
 import joblib
 import torch
-from transformers import BertTokenizer, BertForTokenClassification
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv
+from nltk.corpus import stopwords
+from nltk.tokenize import wordpunct_tokenize
+from nltk.stem import WordNetLemmatizer
 import nltk
-from nltk.tokenize import word_tokenize
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics import classification_report
 import numpy as np
+from torch_geometric.data import Data
 import networkx as nx
-from torch_geometric.utils import from_networkx
+import pandas as pd
 
-# Descargar recursos de NLTK si no están disponibles
-nltk.download('punkt')
+# Download necessary NLTK resources
 nltk.download('stopwords')
 nltk.download('wordnet')
 
-# Preprocesamiento del texto
-def preprocess_text(text):
-    from nltk.corpus import stopwords
-    from nltk.stem import WordNetLemmatizer
+ENTITY_CLASSES = ["Protein", "Disease", "Chemical", "Gene", "Organ", "Pathway"]
 
+# Define the GCN model architecture
+class GCN(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels):
+        super(GCN, self).__init__()
+        self.conv1 = GCNConv(in_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, out_channels)
+
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = self.conv2(x, edge_index)
+        return x
+
+# Path to the GCN model
+gcn_model_path = "./models/gcn_model.pkl"
+
+# Load and reconstruct the GCN model
+@st.cache_resource
+def load_gcn_model():
+    try:
+        gcn_state_dict = joblib.load(gcn_model_path)
+        print("GCN Model State Dict Loaded Successfully")
+        print(f"Keys in GCN state dict: {list(gcn_state_dict.keys())}")
+
+        # Reconstruct the GCN model
+        out_channels = len(gcn_state_dict["conv2.bias"])  # Infer output channels
+        gcn_model = GCN(in_channels=128, hidden_channels=16, out_channels=out_channels)
+        gcn_model.load_state_dict(gcn_state_dict)
+        gcn_model.eval()  # Set to evaluation mode
+        print("GCN Model Reconstructed Successfully")
+        return gcn_model
+    except Exception as e:
+        st.error(f"Failed to load GCN model: {e}")
+        return None
+
+gcn_model = load_gcn_model()
+
+# Preprocess text for GCN input
+def preprocess_text(text):
     lemmatizer = WordNetLemmatizer()
     stop_words = set(stopwords.words('english'))
-    
-    tokens = word_tokenize(text.lower())
+    tokens = wordpunct_tokenize(text.lower())
     tokens = [lemmatizer.lemmatize(word) for word in tokens if word.isalnum() and word not in stop_words]
-    return " ".join(tokens)
+    return tokens
 
-#Creación de grafo para GCN
-def create_graph_from_input(abstract, entities):
+# Create graph data for GCN
+def create_graph_from_input(tokens):
     G = nx.Graph()
-    
-    # Add nodes for the user input abstract
-    for idx, entity in enumerate(entities):
-        unique_entity_id = f"user_{idx}_{entity}"
-        G.add_node(unique_entity_id, abstract_id="user", entity=entity, x=np.random.rand(128))
-    
-    # Add edges between entities in the user input abstract
-    for i in range(len(entities)):
-        for j in range(i + 1, len(entities)):
-            node_id_1 = f"user_{i}_{entities[i]}"
-            node_id_2 = f"user_{j}_{entities[j]}"
-            G.add_edge(node_id_1, node_id_2, relation_type="related")
-    
-    # Ensure all nodes have standard attributes
-    standard_attributes = {'abstract_id': None, 'entity': None}
-    for node in G.nodes:
-        for attr, default_value in standard_attributes.items():
-            if attr not in G.nodes[node]:
-                G.nodes[node][attr] = default_value
-    
-    data = from_networkx(G)
-    return data
+    for idx, token in enumerate(tokens):
+        G.add_node(idx, token=token, x=np.random.rand(128))  # Random embeddings as example
 
-# Cargar modelos y recursos necesarios
-@st.cache_resource
-def load_models():
-    # Carga el modelo SVM y su vectorizador
-    svm_model = joblib.load("./models/svm_model.pkl")
-    
-    # Carga el modelo GCN
-    gcn_model, gcn_vectorizer = joblib.load("./models/gcn_model.pkl")
-    
-    # Carga el modelo BERT y su tokenizer
-    bert_model, tokenizer = joblib.load("./models/bert_model.pkl")
-    
-    return svm_model, gcn_model, gcn_vectorizer, bert_model, tokenizer
+    # Sequential edges
+    edge_index = torch.tensor([[i, i + 1] for i in range(len(tokens) - 1)] +
+                              [[i + 1, i] for i in range(len(tokens) - 1)], dtype=torch.long).T
 
-# Cargar los modelos
-svm_model,  gcn_model, gcn_vectorizer, bert_model, tokenizer = load_models()
-vectorizer = TfidfVectorizer()
+    # Optimize tensor conversion
+    x = torch.tensor(np.array([G.nodes[node]["x"] for node in G.nodes]), dtype=torch.float32)
 
-# Interfaz de la aplicación
-st.title("Identificación de Entidades Biomédicas")
-st.write("Ingrese un resumen biomédico y seleccione el modelo para predecir entidades.")
+    return Data(x=x, edge_index=edge_index), tokens
 
-# Entrada del usuario
-user_input = st.text_area("Resumen Biomédico", "Escribe aquí el texto del resumen...")
-model_option = st.selectbox("Selecciona el modelo:", ["SVM", "GCN", "BERT"])
+# Streamlit App
+st.title("Biomedical Entity Identification with GCN")
+st.write("Enter a biomedical abstract to predict entities.")
 
-# Botón de predicción
-if st.button("Predecir"):
+# User input
+user_input = st.text_area("Biomedical Abstract", "")
+
+# Predict button
+if st.button("Predict"):
     if not user_input.strip():
-        st.error("Por favor ingrese un resumen válido.")
+        st.error("Please enter a valid abstract.")
     else:
-        # Preprocesar el texto
-        preprocessed_text = preprocess_text(user_input)
+        # Preprocess the input text
+        tokens = preprocess_text(user_input)
+        graph_data, token_list = create_graph_from_input(tokens)
 
-        # Predicciones basadas en el modelo seleccionado
-        if model_option == "SVM":
-            # Vectorización del texto para SVM
-            input_vector = vectorizer.transform([preprocessed_text])
-            predictions = svm_model.predict(input_vector)
-            st.write("Entidades Predichas:", predictions)
-        
-        elif model_option == "GCN":
-            # Vectorización y conversión a tensor para GCN
-            input_vector = create_graph_from_input(preprocessed_text, preprocessed_text.split())
-            input_tensor = torch.tensor(input_vector, dtype=torch.float32)
-            predictions = gcn_model(input_tensor)
-            st.write("Entidades Predichas:", predictions.detach().numpy())
-        
-        elif model_option == "BERT":
-            # Tokenización y predicción con BERT
-            inputs = tokenizer(preprocessed_text, return_tensors="pt", truncation=True, padding=True)
-            outputs = bert_model(**inputs)
-            logits = outputs.logits
-            predictions = torch.argmax(logits, dim=2)
-            tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-            entity_results = {token: prediction.item() for token, prediction in zip(tokens, predictions[0])}
-            st.write("Entidades Predichas:", entity_results)
+        # Perform prediction with GCN
+        if gcn_model:
+            try:
+                gcn_prediction = gcn_model(graph_data.x, graph_data.edge_index)
+                probabilities = torch.sigmoid(gcn_prediction).detach().numpy()
 
-        # Confirmación de predicción exitosa
-        st.success("Predicción completada con éxito.")
+                # Map predictions to tokens and entity classes
+                grouped_predictions = {entity: [] for entity in ENTITY_CLASSES}
+                for idx, token in enumerate(token_list):
+                    for i, prob in enumerate(probabilities[idx]):
+                        if prob > 0.5:  # Confidence threshold
+                            grouped_predictions[ENTITY_CLASSES[i]].append((token, prob))
+
+                # Display predictions grouped by entities
+                st.subheader("GCN Model Predictions (Grouped by Entity)")
+                for entity, token_confidences in grouped_predictions.items():
+                    if token_confidences:
+                        st.markdown(f"### **{entity}:**")
+                        token_confidences.sort(key=lambda x: x[1], reverse=True)  # Sort by confidence
+                        st.write(", ".join([f"{token} ({conf:.2f})" for token, conf in token_confidences]))
+
+                # Optionally display raw probabilities as a table
+                df_predictions = pd.DataFrame(probabilities, columns=ENTITY_CLASSES, index=token_list)
+                st.subheader("Prediction Probabilities for Each Token")
+                st.dataframe(df_predictions)
+
+            except Exception as e:
+                st.error(f"Error during prediction with GCN: {e}")

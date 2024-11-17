@@ -14,6 +14,8 @@ from nltk.tokenize import word_tokenize
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import classification_report
 import numpy as np
+import networkx as nx
+from torch_geometric.utils import from_networkx
 
 # Descargar recursos de NLTK si no están disponibles
 nltk.download('punkt')
@@ -32,22 +34,49 @@ def preprocess_text(text):
     tokens = [lemmatizer.lemmatize(word) for word in tokens if word.isalnum() and word not in stop_words]
     return " ".join(tokens)
 
+#Creación de grafo para GCN
+def create_graph_from_input(abstract, entities):
+    G = nx.Graph()
+    
+    # Add nodes for the user input abstract
+    for idx, entity in enumerate(entities):
+        unique_entity_id = f"user_{idx}_{entity}"
+        G.add_node(unique_entity_id, abstract_id="user", entity=entity, x=np.random.rand(128))
+    
+    # Add edges between entities in the user input abstract
+    for i in range(len(entities)):
+        for j in range(i + 1, len(entities)):
+            node_id_1 = f"user_{i}_{entities[i]}"
+            node_id_2 = f"user_{j}_{entities[j]}"
+            G.add_edge(node_id_1, node_id_2, relation_type="related")
+    
+    # Ensure all nodes have standard attributes
+    standard_attributes = {'abstract_id': None, 'entity': None}
+    for node in G.nodes:
+        for attr, default_value in standard_attributes.items():
+            if attr not in G.nodes[node]:
+                G.nodes[node][attr] = default_value
+    
+    data = from_networkx(G)
+    return data
+
 # Cargar modelos y recursos necesarios
 @st.cache_resource
 def load_models():
     # Carga el modelo SVM y su vectorizador
-    svm_model, svm_vectorizer = joblib.load("models/svm_model.pkl")
+    svm_model = joblib.load("./models/svm_model.pkl")
     
     # Carga el modelo GCN
-    gcn_model, gcn_vectorizer = joblib.load("models/gcn_model.pkl")
+    gcn_model, gcn_vectorizer = joblib.load("./models/gcn_model.pkl")
     
     # Carga el modelo BERT y su tokenizer
-    bert_model, tokenizer = joblib.load("models/bert_model.pkl")
+    bert_model, tokenizer = joblib.load("./models/bert_model.pkl")
     
-    return svm_model, svm_vectorizer, gcn_model, gcn_vectorizer, bert_model, tokenizer
+    return svm_model, gcn_model, gcn_vectorizer, bert_model, tokenizer
 
 # Cargar los modelos
-svm_model, svm_vectorizer, gcn_model, gcn_vectorizer, bert_model, tokenizer = load_models()
+svm_model,  gcn_model, gcn_vectorizer, bert_model, tokenizer = load_models()
+vectorizer = TfidfVectorizer()
 
 # Interfaz de la aplicación
 st.title("Identificación de Entidades Biomédicas")
@@ -68,13 +97,13 @@ if st.button("Predecir"):
         # Predicciones basadas en el modelo seleccionado
         if model_option == "SVM":
             # Vectorización del texto para SVM
-            input_vector = svm_vectorizer.transform([preprocessed_text])
+            input_vector = vectorizer.transform([preprocessed_text])
             predictions = svm_model.predict(input_vector)
             st.write("Entidades Predichas:", predictions)
         
         elif model_option == "GCN":
             # Vectorización y conversión a tensor para GCN
-            input_vector = gcn_vectorizer.transform([preprocessed_text]).toarray()
+            input_vector = create_graph_from_input(preprocessed_text, preprocessed_text.split())
             input_tensor = torch.tensor(input_vector, dtype=torch.float32)
             predictions = gcn_model(input_tensor)
             st.write("Entidades Predichas:", predictions.detach().numpy())

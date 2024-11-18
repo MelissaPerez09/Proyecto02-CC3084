@@ -1,17 +1,19 @@
-import streamlit as st
-import joblib
-import torch
-import torch.nn.functional as F
-from torch_geometric.nn import GCNConv
-from nltk.corpus import stopwords
+from transformers import BertTokenizer, BertForSequenceClassification
+from sklearn.feature_extraction.text import TfidfVectorizer
 from nltk.tokenize import wordpunct_tokenize
 from nltk.stem import WordNetLemmatizer
-import nltk
-import numpy as np
+from torch_geometric.nn import GCNConv
 from torch_geometric.data import Data
+from nltk.corpus import stopwords
+import torch.nn.functional as F
+import streamlit as st
 import networkx as nx
 import pandas as pd
-from transformers import BertTokenizer, BertForSequenceClassification
+import numpy as np
+import joblib
+import torch
+import nltk
+import os
 
 # Download necessary NLTK resources
 nltk.download('stopwords')
@@ -32,43 +34,55 @@ class GCN(torch.nn.Module):
         x = self.conv2(x, edge_index)
         return x
 
-# Path to the GCN model
+# Paths to the models
 gcn_model_path = "./models/gcn_model.pkl"
 bert_model_path = "./models/bert_model.pkl"
+svm_model_path = "./models/svm_model.pkl"
+vectorizer_path = "./models/tfidf_vectorizer.pkl"
 
 # Load and reconstruct the GCN model
-@st.cache_resource
 @st.cache_resource
 def load_gcn_model(model_path):
     try:
         gcn_state_dict = joblib.load(model_path)
-        out_channels = len(gcn_state_dict["conv2.bias"])  # Inferir canales de salida
+        out_channels = len(gcn_state_dict["conv2.bias"])  # Infer output channels
         model = GCN(in_channels=128, hidden_channels=16, out_channels=out_channels)
         model.load_state_dict(gcn_state_dict)
-        model.eval()  # Configurar en modo evaluación
+        model.eval()  # Set to evaluation mode
         return model
     except Exception as e:
-        st.error(f"Error al cargar el modelo GCN: {e}")
+        st.error(f"Error loading GCN model: {e}")
         return None
 
+# Load and reconstruct the BERT model
 @st.cache_resource
 def load_bert_model(model_path):
     try:
-        # Cargar state_dict
         bert_state_dict = joblib.load(model_path)
-        # Inicializar modelo y tokenizador BERT predefinido
         model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=len(ENTITY_CLASSES))
         model.load_state_dict(bert_state_dict)
-        model.eval()  # Modo evaluación
+        model.eval()  # Set to evaluation mode
         tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
         return model, tokenizer
     except Exception as e:
-        st.error(f"Error al cargar el modelo BERT: {e}")
+        st.error(f"Error loading BERT model: {e}")
+        return None, None
+
+# Load the SVM model and vectorizer
+@st.cache_resource
+def load_svm_model_and_vectorizer():
+    try:
+        svm_model = joblib.load(svm_model_path)
+        vectorizer = joblib.load(vectorizer_path)
+        return svm_model, vectorizer
+    except Exception as e:
+        st.error(f"Error loading SVM model or vectorizer: {e}")
         return None, None
 
 # Load models
 gcn_model = load_gcn_model(gcn_model_path)
 bert_model, bert_tokenizer = load_bert_model(bert_model_path)
+svm_model, vectorizer = load_svm_model_and_vectorizer()
 
 # Preprocess text for GCN input
 def preprocess_text(text):
@@ -93,12 +107,16 @@ def create_graph_from_input(tokens):
 
     return Data(x=x, edge_index=edge_index), tokens
 
+# Vectorize the text for SVM using the pre-fitted vectorizer
+def vectorize_text_for_svm(text):
+    return vectorizer.transform([text])
+
 # Streamlit App
-st.title("Biomedical Entity Identification ")
-st.write("Select a model to predict entities in a biomedical abstract.")
+st.title("Biomedical Entity Identification with GCN, BERT, and SVM")
+st.write("Enter a biomedical abstract to predict entities.")
 
 # Model selection
-model_choice = st.selectbox("Model:", options=["GCN", "BERT"])
+model_choice = st.selectbox("Model:", options=["GCN", "BERT", "SVM"])
 
 # User input
 user_input = st.text_area("Biomedical Abstract:", "")
@@ -132,25 +150,44 @@ if st.button("Predict"):
                         st.markdown(f"### **{entity}:**")
                         token_confidences.sort(key=lambda x: x[1], reverse=True)
                         st.write(", ".join([f"{token} ({conf:.2f})" for token, conf in token_confidences]))
-                        
-                        df_predictions = pd.DataFrame(probabilities, columns=ENTITY_CLASSES, index=token_list)
+
+                # Optionally display raw probabilities as a table
+                df_predictions = pd.DataFrame(probabilities, columns=ENTITY_CLASSES, index=token_list)
                 st.subheader("Prediction Probabilities for Each Token")
                 st.dataframe(df_predictions)
             except Exception as e:
-                st.error(f"Error durante la predicción con GCN: {e}")
+                st.error(f"Error during prediction with GCN: {e}")
 
+        # Perform prediction with BERT
         elif model_choice == "BERT" and bert_model:
             try:
-                # tokenize input
                 inputs = bert_tokenizer(user_input, return_tensors="pt", truncation=True, padding=True, max_length=512)
                 outputs = bert_model(**inputs)
                 probabilities = torch.softmax(outputs.logits, dim=1).detach().numpy()
 
-                # show BERT predictions
+                # Show BERT predictions
                 st.subheader("BERT Model Predictions")
                 for idx, entity in enumerate(ENTITY_CLASSES):
                     st.write(f"**{entity}:** {probabilities[0][idx]:.2f}")
             except Exception as e:
-                st.error(f"Error durante la predicción con BERT: {e}")
+                st.error(f"Error during prediction with BERT: {e}")
+
+        # Perform prediction with SVM
+        elif model_choice == "SVM" and svm_model and vectorizer:
+            try:
+                svm_vectorized_input = vectorize_text_for_svm(user_input)
+                svm_prediction_prob = svm_model.predict_proba(svm_vectorized_input)
+                prediction_summary = {entity: svm_prediction_prob[0][i] for i, entity in enumerate(ENTITY_CLASSES)}
+
+                st.subheader("SVM Model Predictions (Summary)")
+                for entity, prob in prediction_summary.items():
+                    st.write(f"**{entity}:** {prob:.2f}")
+
+                svm_probabilities = svm_model.predict_proba(vectorizer.transform(tokens))
+                df_svm = pd.DataFrame(svm_probabilities, columns=svm_model.classes_, index=tokens)
+                st.subheader("SVM Model Predictions (Detailed by Token)")
+                st.dataframe(df_svm)
+            except Exception as e:
+                st.error(f"Error during prediction with SVM: {e}")
         else:
-            st.error(f"Modelo {model_choice} no disponible.")
+            st.error(f"Model {model_choice} not available.")

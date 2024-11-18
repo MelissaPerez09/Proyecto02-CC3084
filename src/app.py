@@ -114,6 +114,12 @@ def create_graph_from_input(tokens):
 def vectorize_text_for_svm(text):
     return vectorizer.transform([text])
 
+# top 3 entities
+def get_top_entities(predictions, entity_classes, top_n=3):
+    top_indices = np.argsort(predictions)[-top_n:][::-1]
+    top_entities = [(entity_classes[idx], predictions[idx]) for idx in top_indices]
+    return top_entities
+
 # Streamlit App
 st.title("Biomedical Entity Identification with GCN, BERT, and SVM")
 st.write("Enter a biomedical abstract to predict entities.")
@@ -242,5 +248,66 @@ if st.button("Predict"):
                 st.dataframe(df_svm)
             except Exception as e:
                 st.error(f"Error during prediction with SVM: {e}")
+        
+        # compare models
+        elif model_choice == "Compare Models":
+            metrics = pd.DataFrame({
+                "Model": ["SVM", "GCN", "BERT"],
+                "F1 Score (Micro)": [0.901716, 0.627119, 0.841060],
+                "Sequence Label Accuracy": [0.3875, 0.0125, 0.2250],
+                "ROC-AUC": [0.841907, 0.695623, 0.791120]
+            })
+            
+            st.subheader("Model Comparison")
+            
+            # metrics table
+            st.subheader("Performance Metrics")
+            st.dataframe(metrics)
+            
+            # bar chart metrics comparison
+            st.subheader("Metric Comparison")
+            plot_model_metrics(metrics)
+
+            # classify abstract
+            if user_input.strip():
+                tokens = preprocess_text(user_input)
+                
+                # GCN predictions
+                if gcn_model:
+                    graph_data, token_list = create_graph_from_input(tokens)
+                    gcn_predictions = torch.sigmoid(gcn_model(graph_data.x, graph_data.edge_index)).detach().numpy().mean(axis=0)
+                    gcn_top_entities = get_top_entities(gcn_predictions, ENTITY_CLASSES)
+                else:
+                    gcn_top_entities = None
+
+                # BERT predictions
+                if bert_model:
+                    inputs = bert_tokenizer(user_input, return_tensors="pt", truncation=True, padding=True, max_length=512)
+                    bert_outputs = bert_model(**inputs)
+                    bert_predictions = torch.softmax(bert_outputs.logits, dim=1).detach().numpy()[0]
+                    bert_top_entities = get_top_entities(bert_predictions, ENTITY_CLASSES)
+                else:
+                    bert_top_entities = None
+
+                # SVM predictions
+                if svm_model and vectorizer:
+                    svm_vectorized_input = vectorize_text_for_svm(user_input)
+                    svm_predictions = svm_model.predict_proba(svm_vectorized_input).flatten()
+                    svm_top_entities = get_top_entities(svm_predictions, ENTITY_CLASSES)
+                else:
+                    svm_top_entities = None
+
+                # show top 3 entities predicted by each model
+                st.subheader("Top 3 Entities Predicted by Each Model")
+                result_data = {
+                    "Model": ["GCN", "BERT", "SVM"],
+                    "Top 3 Entities": [
+                        ", ".join([f"{entity} ({prob:.2f})" for entity, prob in gcn_top_entities]) if gcn_top_entities else "N/A",
+                        ", ".join([f"{entity} ({prob:.2f})" for entity, prob in bert_top_entities]) if bert_top_entities else "N/A",
+                        ", ".join([f"{entity} ({prob:.2f})" for entity, prob in svm_top_entities]) if svm_top_entities else "N/A"
+                    ]
+                }
+                st.table(result_data)
+                        
         else:
             st.error(f"Model {model_choice} not available.")

@@ -91,3 +91,13 @@ def create_interactive_graph(tokens, probabilities, edge_index, entity_classes):
                         yaxis=dict(showgrid=False, zeroline=False)
                     ))
     return fig
+
+def plot_model_metrics(metrics_df):
+    metrics_df.set_index('Model', inplace=True)
+    ax = metrics_df.plot(kind='bar', figsize=(10, 6))
+    plt.xlabel('Models')
+    plt.ylabel('Score')
+    plt.legend(loc='upper center')
+    plt.xticks(rotation=0)
+    st.pyplot(plt)
+    plt.clf()
